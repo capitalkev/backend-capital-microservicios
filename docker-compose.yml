@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  rabbitmq:
+    image: "rabbitmq:3.13-management-alpine"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - app-network
+
+  api_gateway:
+    build: ./api_gateway
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./api_gateway:/app
+    env_file: .env
+    networks:
+      - app-network
+    depends_on:
+      - rabbitmq
+
+  orchestration_service:
+    build: ./orchestration_service
+    volumes:
+      - ./orchestration_service:/app
+      - ./shared:/app/shared
+    env_file: .env
+    networks:
+      - app-network
+    depends_on:
+      - rabbitmq
+
+  parser_service:
+    build: ./integration_services/parser_service
+    volumes:
+      - ./integration_services/parser_service:/app
+      - ./shared:/app/shared
+    env_file: .env
+    networks:
+      - app-network
+    depends_on:
+      - rabbitmq
+      
+  # Agrega aquí los demás servicios de integración de forma similar...
+
+networks:
+  app-network:
+    driver: bridge
