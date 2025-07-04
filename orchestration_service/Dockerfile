@@ -1,7 +1,14 @@
-FROM python:3.9-slim
+# Usa la imagen completa de Python 3.9, que es más robusta
+FROM python:3.9
+
+ENV PYTHONUNBUFFERED True
 WORKDIR /app
+
+# Actualiza pip primero para asegurar la compatibilidad de los paquetes
+RUN python -m pip install --upgrade pip
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-# Copia el código de la app y la carpeta compartida si es necesario
+
 COPY . .
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

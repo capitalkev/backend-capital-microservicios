@@ -1,42 +1,52 @@
-import threading
-from fastapi import FastAPI, Depends, HTTPException
+import base64
+import json
+import os
+from fastapi import FastAPI, Request, HTTPException, Depends
+from google.cloud import pubsub_v1
 from sqlalchemy.orm import Session
-from . import event_handler, repository
-from .database import get_db, Base, engine
 
-# Crear tablas en la base de datos al iniciar
-Base.metadata.create_all(bind=engine)
+# --- SECCIÓN CORREGIDA ---
+# Se quitan los puntos de las importaciones para que sean absolutas.
+# Python buscará los archivos en el mismo directorio.
+import database
+import repository
+# --- FIN DE LA SECCIÓN CORREGIDA ---
 
-app = FastAPI(
-    title="Orchestration Service",
-    description="El cerebro del sistema de microservicios. Gestiona el estado de las operaciones.",
-    version="1.0.0"
-)
+# --- Configuración ---
+app = FastAPI(title="Orchestration Service")
+publisher = pubsub_v1.PublisherClient()
+PROJECT_ID = os.getenv("GCP_PROJECT_ID")
 
-@app.on_event("startup")
-def startup_event():
-    """Inicia el consumidor de eventos de RabbitMQ en un hilo separado."""
-    thread = threading.Thread(target=event_handler.start_event_listener, daemon=True)
-    thread.start()
+# Crea la tabla en la base de datos si no existe
+database.Base.metadata.create_all(bind=database.engine)
 
-@app.get("/api/v1/operaciones/{operation_id}/status", summary="Obtener el estado de una operación")
-def get_operation_status(operation_id: str, db: Session = Depends(get_db)):
-    """
-    Endpoint para que el frontend pueda consultar el estado actual
-    y los resultados de una operación específica.
-    """
+@app.post("/")
+async def handle_pubsub_message(request: Request, db: Session = Depends(database.get_db)):
+    envelope = await request.json()
+    pubsub_message = envelope["message"]
+    event_data = json.loads(base64.b64decode(pubsub_message["data"]).decode("utf-8"))
+    
+    op_id = event_data.get("operation_id")
+    print(f"[Orquestador] Evento recibido para op: {op_id}")
+    
     repo = repository.OperationRepository(db)
-    operation = repo.get_operation(operation_id)
-    if not operation:
-        raise HTTPException(status_code=404, detail="Operación no encontrada")
-    return {
-        "operation_id": operation.operation_id,
-        "status": operation.status,
-        "results": operation.results,
-        "error": operation.error_message,
-        "created_at": operation.created_at,
-        "last_updated": operation.updated_at
-    }
+
+    # Lógica de orquestación (simplificada para el ejemplo)
+    if pubsub_message["attributes"]["type"] == "OperationReceived":
+        repo.create_log(op_id, event_data.get("file_paths", {}))
+        repo.update_status(op_id, "PARSING")
+
+        xml_path = next((path for filename, path in event_data.get("file_paths", {}).items() if filename.lower().endswith('.xml')), None)
+        
+        if xml_path:
+            command = {"operation_id": op_id, "xml_file_path": xml_path}
+            topic_path = publisher.topic_path(PROJECT_ID, "commands-parse-xml")
+            publisher.publish(topic_path, json.dumps(command).encode("utf-8"))
+            print(f"[Orquestador] Comando de parseo publicado para op: {op_id}")
+        else:
+            repo.update_status(op_id, "FAILED_NO_XML")
+    
+    return {"status": "processed"}
 
 @app.get("/health")
 def health_check():

@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-pika
+google-cloud-pubsub
 sqlalchemy
 psycopg2-binary
-python-dotenv
+google-api-python-client
