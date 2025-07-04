@@ -1,66 +1,57 @@
-import pika
 import json
-import uuid
 import os
-import shutil
+import uuid
 from fastapi import FastAPI, Form, File, UploadFile, HTTPException
 from typing import List
+from google.cloud import storage, pubsub_v1
 
-# --- Configuración ---
-app = FastAPI(title="API Gateway", description="Punto de entrada para todas las operaciones.")
-RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'rabbitmq')
-QUEUE_NAME = 'q.operations.received'
-TEMP_UPLOADS_DIR = "/tmp/uploads"
+# --- Configuración de la App y Clientes de Google Cloud ---
+app = FastAPI(title="API Gateway (Modo Prueba Directa)")
+storage_client = storage.Client()
+publisher = pubsub_v1.PublisherClient()
 
-# --- Lógica de Negocio ---
-def publish_event(event_body: dict):
-    """Publica un evento en la cola de operaciones recibidas."""
-    connection = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
-    channel = connection.channel()
-    channel.queue_declare(queue=QUEUE_NAME, durable=True)
-    channel.basic_publish(
-        exchange='',
-        routing_key=QUEUE_NAME,
-        body=json.dumps(event_body),
-        properties=pika.BasicProperties(delivery_mode=pika.spec.PERSISTENT_DELIVERY_MODE)
-    )
-    connection.close()
-    print(f" [x] Evento 'OperationReceived' enviado para op_id: {event_body['operation_id']}")
+# --- Variables de Entorno ---
+PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+BUCKET_NAME = "operaciones-capital-express-uploads"
+COMMAND_TOPIC_NAME = "commands-parse-xml" 
+topic_path = publisher.topic_path(PROJECT_ID, COMMAND_TOPIC_NAME)
 
-# --- Endpoints ---
-@app.on_event("startup")
-def startup_event():
-    os.makedirs(TEMP_UPLOADS_DIR, exist_ok=True)
-
-@app.post("/api/v1/operaciones", status_code=202, summary="Crea una nueva operación de factoring")
-async def create_operation(metadata: str = Form(...), files: List[UploadFile] = File(...)):
-    """
-    Recibe los archivos y metadatos, los guarda temporalmente y dispara
-    un evento para que el backend comience el procesamiento asíncrono.
-    """
+@app.post("/api/v1/operaciones", status_code=202)
+async def create_operation(
+    metadata: str = Form(...),
+    files: List[UploadFile] = File(...)
+):
     operation_id = str(uuid.uuid4())
-    operation_temp_path = os.path.join(TEMP_UPLOADS_DIR, operation_id)
-    os.makedirs(operation_temp_path)
+    xml_file = next((f for f in files if f.filename.lower().endswith('.xml')), None)
 
-    file_paths = {file.filename: os.path.join(operation_temp_path, file.filename) for file in files}
-    
+    if not xml_file:
+        raise HTTPException(status_code=400, detail="No se encontró un archivo XML en la subida.")
+
     try:
-        for file in files:
-            with open(file_paths[file.filename], "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
+        bucket = storage_client.bucket(BUCKET_NAME)
+        # Sube solo el archivo XML para esta prueba
+        blob_name = f"{operation_id}/{xml_file.filename}"
+        blob = bucket.blob(blob_name)
+        blob.upload_from_file(xml_file.file, content_type=xml_file.content_type)
+        gcs_xml_path = f"gs://{BUCKET_NAME}/{blob_name}"
 
-        event_body = {
+        # Prepara el COMANDO directo para el parser
+        command_to_publish = {
             "operation_id": operation_id,
-            "metadata": json.loads(metadata),
-            "file_paths": file_paths
+            "xml_file_path": gcs_xml_path 
         }
-        publish_event(event_body)
-        return {"status": "processing_queued", "operation_id": operation_id}
-    except Exception as e:
-        if os.path.exists(operation_temp_path):
-            shutil.rmtree(operation_temp_path)
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/health", summary="Verifica el estado del servicio")
+        # Publica el comando en Pub/Sub
+        command_data_bytes = json.dumps(command_to_publish).encode("utf-8")
+        future = publisher.publish(topic_path, command_data_bytes)
+        future.result()
+        
+        print(f"[API Gateway] Comando de parseo publicado para op: {operation_id}")
+        return {"status": "parse_command_sent", "operation_id": operation_id, "file_path": gcs_xml_path}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en la subida o publicación: {str(e)}")
+
+@app.get("/health")
 def health_check():
     return {"status": "ok", "service": "API Gateway"}
