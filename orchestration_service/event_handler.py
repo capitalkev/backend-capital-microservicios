@@ -1,80 +1,56 @@
 import pika
 import json
 import os
-from repository import OperationRepository
-from database import SessionLocal
-from shared.event_models import OperationReceivedEvent, ParseCommand
+import time
+from sqlalchemy.orm import Session
+from .database import get_db
+from . import state_machine
 
-RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
+# Mapeo de colas a funciones de manejo
+EVENT_HANDLERS = {
+    'q.operations.received': state_machine.on_operation_received,
+    'q.events.invoices.parsed': state_machine.on_invoices_parsed,
+    # 'q.events.invoices.validated': state_machine.on_invoices_validated,
+    # ... otros eventos
+}
 
-# Colas de entrada
-OP_RECEIVED_QUEUE = 'q.operations.received'
+def start_event_listener():
+    """Inicia el consumidor de RabbitMQ para todos los eventos."""
+    RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'rabbitmq')
+    
+    while True:
+        try:
+            connection = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
+            channel = connection.channel()
+            print('[Orquestador] Conectado a RabbitMQ. Escuchando eventos...')
 
-# Colas de salida (comandos)
-PARSE_COMMAND_QUEUE = 'q.commands.parse'
-# ...otras colas de comandos
+            db_session = next(get_db())
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+            def callback(ch, method, properties, body):
+                queue_name = method.routing_key
+                handler_func = EVENT_HANDLERS.get(queue_name)
+                
+                if handler_func:
+                    event_data = json.loads(body)
+                    print(f" [Orquestador] Evento recibido de '{queue_name}' para op: {event_data.get('operation_id')}")
+                    try:
+                        handler_func(channel, db_session, event_data)
+                    except Exception as e:
+                        print(f"ERROR: Falla al procesar evento de '{queue_name}': {e}")
+                        # Aquí podrías implementar lógica de reintento o mover a una cola de errores.
+                
+                ch.basic_ack(delivery_tag=method.delivery_tag)
 
-def publish_command(queue_name: str, command: dict):
-    connection = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
-    channel = connection.channel()
-    channel.queue_declare(queue=queue_name, durable=True)
-    channel.basic_publish(
-        exchange='',
-        routing_key=queue_name,
-        body=json.dumps(command),
-        properties=pika.BasicProperties(delivery_mode=2)
-    )
-    connection.close()
+            # Declarar y consumir de todas las colas de eventos
+            for queue in EVENT_HANDLERS.keys():
+                channel.queue_declare(queue=queue, durable=True)
+                channel.basic_consume(queue=queue, on_message_callback=callback)
 
-def handle_operation_received(ch, method, properties, body):
-    db = next(get_db())
-    repo = OperationRepository(db)
-    
-    event_data = json.loads(body)
-    event = OperationReceivedEvent(**event_data)
-    
-    print(f"[Orquestador] Recibida operación: {event.operation_id}")
-    
-    # 1. Crear registro en la BD
-    repo.create_operation(
-        operation_id=event.operation_id,
-        status='RECEIVED',
-        user_email=event.metadata.get('user_email', 'N/A')
-    )
-    
-    # 2. Publicar comando para el siguiente paso: Parseo
-    xml_files = [path for name, path in event.temp_file_paths.items() if name.lower().endswith('.xml')]
-    
-    parse_command = ParseCommand(
-        operation_id=event.operation_id,
-        xml_file_paths=xml_files
-    )
-    
-    publish_command(PARSE_COMMAND_QUEUE, parse_command.dict())
-    print(f"[Orquestador] Publicado comando para parsear XML de {event.operation_id}")
-    
-    ch.basic_ack(delivery_tag=method.delivery_tag)
+            channel.start_consuming()
 
-def start_listening():
-    connection = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
-    channel = connection.channel()
-    
-    # Declarar colas
-    channel.queue_declare(queue=OP_RECEIVED_QUEUE, durable=True)
-    channel.queue_declare(queue=PARSE_COMMAND_QUEUE, durable=True)
-    
-    # Consumir de la cola de operaciones recibidas
-    channel.basic_consume(queue=OP_RECEIVED_QUEUE, on_message_callback=handle_operation_received)
-
-    print('[Orquestador] Esperando eventos...')
-    channel.start_consuming()
-
-if __name__ == '__main__':
-    start_listening()
+        except pika.exceptions.AMQPConnectionError:
+            print("[Orquestador] Conexión perdida. Reintentando en 5 segundos...")
+            time.sleep(5)
+        finally:
+            if 'db_session' in locals() and db_session:
+                db_session.close()
