@@ -5,19 +5,13 @@ from fastapi import FastAPI, Request, HTTPException, Depends
 from google.cloud import pubsub_v1
 from sqlalchemy.orm import Session
 
-# --- SECCIÓN CORREGIDA ---
-# Se quitan los puntos de las importaciones para que sean absolutas.
-# Python buscará los archivos en el mismo directorio.
 import database
 import repository
-# --- FIN DE LA SECCIÓN CORREGIDA ---
 
-# --- Configuración ---
 app = FastAPI(title="Orchestration Service")
 publisher = pubsub_v1.PublisherClient()
 PROJECT_ID = os.getenv("GCP_PROJECT_ID")
 
-# Crea la tabla en la base de datos si no existe
 database.Base.metadata.create_all(bind=database.engine)
 
 @app.post("/")
