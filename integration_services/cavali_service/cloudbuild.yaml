@@ -1,0 +1,18 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/cavali-service:$BUILD_ID', '.']
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/cavali-service:$BUILD_ID']
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args:
+    - 'run'
+    - 'deploy'
+    - 'cavali-service'
+    - '--image'
+    - 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/cavali-service:$BUILD_ID'
+    - '--region'
+    - 'southamerica-west1'
+    - '--no-allow-unauthenticated'
+    - '--update-secrets=CAVALI_CLIENT_ID=CAVALI_CLIENT_ID:latest,CAVALI_CLIENT_SECRET=CAVALI_CLIENT_SECRET:latest,CAVALI_SCOPE=CAVALI_SCOPE:latest,CAVALI_TOKEN_URL=CAVALI_TOKEN_URL:latest,CAVALI_API_KEY=CAVALI_API_KEY:latest,CAVALI_BLOCK_URL=CAVALI_BLOCK_URL:latest,CAVALI_STATUS_URL=CAVALI_STATUS_URL:latest'
+    - '--set-env-vars=GCP_PROJECT_ID=$PROJECT_ID'

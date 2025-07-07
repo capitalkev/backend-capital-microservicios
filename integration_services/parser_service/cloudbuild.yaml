@@ -1,15 +1,8 @@
-# cloudbuild.yaml CORREGIDO PARA SANTIAGO (southamerica-west1)
-
 steps:
-# Paso 1: Construye la imagen de Docker
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/parser-service:latest', '.']
-
-# Paso 2: Sube la imagen al registro privado de Artifact Registry
+  args: ['build', '-t', 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/parser-service:$BUILD_ID', '.']
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['push', 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/parser-service:latest']
-
-# Paso 3: Despliega la imagen en Cloud Run
+  args: ['push', 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/parser-service:$BUILD_ID']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
   args:
@@ -17,14 +10,8 @@ steps:
     - 'deploy'
     - 'parser-service'
     - '--image'
-    - 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/parser-service:latest'
+    - 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/parser-service:$BUILD_ID'
     - '--region'
-    - 'southamerica-west1' # <-- REGIÓN DE CLOUD RUN
-    - '--platform'
-    - 'managed'
+    - 'southamerica-west1'
     - '--no-allow-unauthenticated'
     - '--set-env-vars=GCP_PROJECT_ID=$PROJECT_ID'
-
-# Lista las imágenes que este build produce
-images:
-- 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/parser-service:latest'

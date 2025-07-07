@@ -1,5 +1,3 @@
-# orchestration_service/database.py (VERSIÓN FINAL Y CORRECTA)
-
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -10,9 +8,8 @@ DB_PASS = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME", "postgres")
 INSTANCE_CONNECTION_NAME = os.getenv("INSTANCE_CONNECTION_NAME")
 
-
-if not DB_PASS or not INSTANCE_CONNECTION_NAME:
-    raise ValueError("Las variables de entorno DB_PASSWORD e INSTANCE_CONNECTION_NAME deben estar definidas.")
+if not all([DB_PASS, INSTANCE_CONNECTION_NAME]):
+    raise ValueError("Se requieren las variables de entorno: DB_PASSWORD, INSTANCE_CONNECTION_NAME")
 
 DATABASE_URL = (
     f"postgresql+psycopg2://{DB_USER}:{DB_PASS}@/{DB_NAME}"

@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-google-cloud-pubsub
 sqlalchemy
 psycopg2-binary
-google-api-python-client
+google-cloud-pubsub
+google-cloud-firestore

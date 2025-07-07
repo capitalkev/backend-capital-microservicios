@@ -1,4 +1,3 @@
-# orchestration_service/cloudbuild.yaml (VERSIÓN FINAL Y MÁS ROBUSTA)
 steps:
 - name: 'gcr.io/cloud-builders/docker'
   args: ['build', '-t', 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/orchestration-service:$BUILD_ID', '.']
@@ -15,8 +14,12 @@ steps:
     - '--region'
     - 'southamerica-west1'
     - '--no-allow-unauthenticated'
-    - '--add-cloudsql-instances=$PROJECT_ID:southamerica-west1:operaciones-db'
+    # Asigna la cuenta de servicio específica que creamos
+    - '--service-account'
+    - 'orchestration-sa@$PROJECT_ID.iam.gserviceaccount.com'
+    # Inyecta el secreto de la contraseña de la base de datos
     - '--update-secrets=DB_PASSWORD=DB_PASSWORD:latest'
-    # --- SECCIÓN CORREGIDA ---
-    # Ahora definimos explícitamente TODAS las variables que necesita database.py
+    # Conecta el servicio a la instancia de Cloud SQL
+    - '--add-cloudsql-instances=$PROJECT_ID:southamerica-west1:operaciones-db'
+    # Define las variables de entorno para la conexión
     - '--set-env-vars=^##^GCP_PROJECT_ID=$PROJECT_ID##INSTANCE_CONNECTION_NAME=$PROJECT_ID:southamerica-west1:operaciones-db##DB_USER=postgres##DB_NAME=postgres'

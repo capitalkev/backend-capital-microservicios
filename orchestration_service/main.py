@@ -1,54 +1,85 @@
-from fastapi import FastAPI, UploadFile, Form, File
-from google.cloud import pubsub_v1, storage
-import os, uuid, json
+import base64
+import json
+import os
+from fastapi import FastAPI, Request, HTTPException, Depends
+from sqlalchemy.orm import Session
+from google.cloud import pubsub_v1, firestore
 
-app = FastAPI(title="Orquestador Capital Express")
+import models, repository, database
 
-GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
-BUCKET_NAME = os.getenv("BUCKET_NAME", "capitalexpress-operations")
-TOPIC_NAME = "parser-invoices-xml"
-
+# --- Configuración ---
+app = FastAPI(title="Orchestration Service")
 publisher = pubsub_v1.PublisherClient()
-storage_client = storage.Client()
-bucket = storage_client.bucket(BUCKET_NAME)
+db_firestore = firestore.Client()
+PROJECT_ID = os.getenv("GCP_PROJECT_ID", "operaciones-peru")
+FIRESTORE_COLLECTION = "operations_status"
 
-@app.post("/submit-operation")
-async def submit_operation(
-    xml_file: UploadFile = File(...),
-    pdf_file: UploadFile = File(...),
-    respaldo_files: list[UploadFile] = File(...),
-    tasa: float = Form(...),
-    comision: float = Form(...),
-    adelanto: float = Form(...),
-    correos: str = Form(""),
-    cuenta_bancaria: str = Form(...)
-):
-    operation_id = f"OP-{uuid.uuid4().hex[:8].upper()}"
+@app.on_event("startup")
+def on_startup():
+    database.Base.metadata.create_all(bind=database.engine)
 
-    # 1. Subir archivos a Cloud Storage
-    def upload_file(file: UploadFile, folder: str) -> str:
-        blob_path = f"{operation_id}/{folder}/{file.filename}"
-        blob = bucket.blob(blob_path)
-        blob.upload_from_file(file.file)
-        return f"gs://{BUCKET_NAME}/{blob_path}"
+def publish_command(topic_name: str, data: dict):
+    topic_path = publisher.topic_path(PROJECT_ID, topic_name)
+    future = publisher.publish(topic_path, json.dumps(data).encode("utf-8"))
+    future.result()
+    print(f"  -> Comando '{topic_name}' publicado para op: {data['operation_id']}")
 
-    xml_path = upload_file(xml_file, "xml")
-    pdf_path = upload_file(pdf_file, "pdf")
-    respaldo_paths = [upload_file(f, "respaldos") for f in respaldo_files]
+def update_firestore_status(op_id: str, status: str, details: dict = None):
+    doc_ref = db_firestore.collection(FIRESTORE_COLLECTION).document(op_id)
+    update_data = {"status": status, "last_updated": firestore.SERVER_TIMESTAMP}
+    if details:
+        update_data["details"] = details
+    doc_ref.set(update_data, merge=True)
+    print(f"  -> Estado en Firestore actualizado a: {status}")
 
-    # 2. Publicar mensaje inicial a parser-invoices-xml
-    msg = {
-        "operation_id": operation_id,
-        "xml_file_path": xml_path
-    }
+@app.post("/", status_code=204)
+async def handle_pubsub_message(request: Request, db: Session = Depends(database.get_db)):
+    envelope = await request.json()
+    message = envelope.get("message")
+    if not message:
+        raise HTTPException(status_code=400, detail="Payload de Pub/Sub inválido.")
+    
+    source_topic = message.get("attributes", {}).get("googclient_delivery_topic", "unknown").split("/")[-1]
+    event_data = json.loads(base64.b64decode(message["data"]).decode("utf-8"))
+    op_id = event_data.get("operation_id")
+    
+    if not op_id:
+        return ""
 
-    topic_path = publisher.topic_path(GCP_PROJECT_ID, TOPIC_NAME)
-    publisher.publish(topic_path, json.dumps(msg).encode("utf-8"))
+    print(f"[Orquestador] Evento '{source_topic}' recibido para op: {op_id}")
+    repo = repository.OperationRepository(db)
+    
+    try:
+        if source_topic == "operations-received":
+            repo.create_log(operation_id=op_id, file_paths=event_data.get("file_paths", {}))
+            update_firestore_status(op_id, "RECIBIDO")
+            repo.update_status(op_id, "PARSING_XML")
+            update_firestore_status(op_id, "PROCESANDO_FACTURA")
+            
+            xml_path = next((p for p in event_data.get("file_paths", {}).values() if p.lower().endswith('.xml')), None)
+            if xml_path:
+                publish_command("commands-parse-xml", {
+                    "operation_id": op_id,
+                    "xml_file_path": xml_path
+                })
 
-    return {
-        "status": "started",
-        "operation_id": operation_id,
-        "xml": xml_path,
-        "pdf": pdf_path,
-        "respaldos": respaldo_paths
-    }
+        elif source_topic == "events-invoices-parsed":
+            if event_data.get("status") == "SUCCESS":
+                repo.update_status(op_id, "VALIDATING_CAVALI")
+                update_firestore_status(op_id, "VALIDANDO_CON_CAVALI")
+                # Aquí publicarías el comando para Cavali
+                # publish_command("commands-validate-cavali", {...})
+            else:
+                error = event_data.get("error_message")
+                repo.update_status(op_id, "ERROR_PARSING", error)
+                update_firestore_status(op_id, "ERROR_PROCESANDO_FACTURA", {"error": error})
+        
+        # Aquí puedes seguir agregando lógica para otros eventos futuros...
+
+    except Exception as e:
+        error_msg = f"Error crítico en Orquestador: {e}"
+        print(f"ERROR para op {op_id}: {error_msg}")
+        repo.update_status(op_id, "ERROR_ORCHESTRATION", error_msg)
+        update_firestore_status(op_id, "ERROR_INESPERADO", {"error": error_msg})
+    
+    return ""

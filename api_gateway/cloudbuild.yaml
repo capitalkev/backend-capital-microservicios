@@ -1,13 +1,8 @@
-# api_gateway/cloudbuild.yaml (CORREGIDO)
 steps:
 - name: 'gcr.io/cloud-builders/docker'
-  # Se cambió $COMMIT_SHA por $BUILD_ID para que siempre haya una etiqueta única
   args: ['build', '-t', 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/api-gateway:$BUILD_ID', '.']
-
 - name: 'gcr.io/cloud-builders/docker'
-  # Se cambió $COMMIT_SHA por $BUILD_ID
   args: ['push', 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/api-gateway:$BUILD_ID']
-
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
   args:
@@ -15,7 +10,6 @@ steps:
     - 'deploy'
     - 'api-gateway'
     - '--image'
-    # Se cambió $COMMIT_SHA por $BUILD_ID
     - 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/api-gateway:$BUILD_ID'
     - '--region'
     - 'southamerica-west1'
@@ -23,7 +17,3 @@ steps:
     - 'managed'
     - '--allow-unauthenticated'
     - '--set-env-vars=GCP_PROJECT_ID=$PROJECT_ID'
-
-# Es una buena práctica listar la imagen final aquí
-images:
-- 'southamerica-west1-docker.pkg.dev/$PROJECT_ID/capital-express-repo/api-gateway:$BUILD_ID'
