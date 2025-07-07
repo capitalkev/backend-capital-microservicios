@@ -1,4 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 lxml
 google-cloud-pubsub
+google-cloud-storage

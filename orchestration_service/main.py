@@ -1,47 +1,54 @@
-import base64
-import json
-import os
-from fastapi import FastAPI, Request, HTTPException, Depends
-from google.cloud import pubsub_v1
-from sqlalchemy.orm import Session
+from fastapi import FastAPI, UploadFile, Form, File
+from google.cloud import pubsub_v1, storage
+import os, uuid, json
 
-import database
-import repository
+app = FastAPI(title="Orquestador Capital Express")
 
-app = FastAPI(title="Orchestration Service")
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+BUCKET_NAME = os.getenv("BUCKET_NAME", "capitalexpress-operations")
+TOPIC_NAME = "parser-invoices-xml"
+
 publisher = pubsub_v1.PublisherClient()
-PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+storage_client = storage.Client()
+bucket = storage_client.bucket(BUCKET_NAME)
 
-database.Base.metadata.create_all(bind=database.engine)
+@app.post("/submit-operation")
+async def submit_operation(
+    xml_file: UploadFile = File(...),
+    pdf_file: UploadFile = File(...),
+    respaldo_files: list[UploadFile] = File(...),
+    tasa: float = Form(...),
+    comision: float = Form(...),
+    adelanto: float = Form(...),
+    correos: str = Form(""),
+    cuenta_bancaria: str = Form(...)
+):
+    operation_id = f"OP-{uuid.uuid4().hex[:8].upper()}"
 
-@app.post("/")
-async def handle_pubsub_message(request: Request, db: Session = Depends(database.get_db)):
-    envelope = await request.json()
-    pubsub_message = envelope["message"]
-    event_data = json.loads(base64.b64decode(pubsub_message["data"]).decode("utf-8"))
-    
-    op_id = event_data.get("operation_id")
-    print(f"[Orquestador] Evento recibido para op: {op_id}")
-    
-    repo = repository.OperationRepository(db)
+    # 1. Subir archivos a Cloud Storage
+    def upload_file(file: UploadFile, folder: str) -> str:
+        blob_path = f"{operation_id}/{folder}/{file.filename}"
+        blob = bucket.blob(blob_path)
+        blob.upload_from_file(file.file)
+        return f"gs://{BUCKET_NAME}/{blob_path}"
 
-    # Lógica de orquestación (simplificada para el ejemplo)
-    if pubsub_message["attributes"]["type"] == "OperationReceived":
-        repo.create_log(op_id, event_data.get("file_paths", {}))
-        repo.update_status(op_id, "PARSING")
+    xml_path = upload_file(xml_file, "xml")
+    pdf_path = upload_file(pdf_file, "pdf")
+    respaldo_paths = [upload_file(f, "respaldos") for f in respaldo_files]
 
-        xml_path = next((path for filename, path in event_data.get("file_paths", {}).items() if filename.lower().endswith('.xml')), None)
-        
-        if xml_path:
-            command = {"operation_id": op_id, "xml_file_path": xml_path}
-            topic_path = publisher.topic_path(PROJECT_ID, "commands-parse-xml")
-            publisher.publish(topic_path, json.dumps(command).encode("utf-8"))
-            print(f"[Orquestador] Comando de parseo publicado para op: {op_id}")
-        else:
-            repo.update_status(op_id, "FAILED_NO_XML")
-    
-    return {"status": "processed"}
+    # 2. Publicar mensaje inicial a parser-invoices-xml
+    msg = {
+        "operation_id": operation_id,
+        "xml_file_path": xml_path
+    }
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "service": "Orchestration Service"}
+    topic_path = publisher.topic_path(GCP_PROJECT_ID, TOPIC_NAME)
+    publisher.publish(topic_path, json.dumps(msg).encode("utf-8"))
+
+    return {
+        "status": "started",
+        "operation_id": operation_id,
+        "xml": xml_path,
+        "pdf": pdf_path,
+        "respaldos": respaldo_paths
+    }
